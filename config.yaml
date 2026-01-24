@@ -46,7 +46,8 @@ detection:
 recognition:
   model:
     input_height: 32
-    input_width: 256
+    input_width: 256  # Default width (can be dynamic)
+    max_width: 512    # Maximum supported width for long texts
     hidden_size: 256
     num_layers: 2
     dropout: 0.1
@@ -54,6 +55,7 @@ recognition:
   inference:
     beam_width: 5
     max_length: 100
+    variable_width: true  # Enable dynamic width based on text length
   
   weights_path: "ocr_engine/recognition/weights/crnn.pth"
 

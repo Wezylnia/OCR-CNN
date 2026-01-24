@@ -6,13 +6,13 @@ import cv2
 import numpy as np
 import torch
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union, Dict
 from pathlib import Path
 import yaml
 
 from .preprocessing import ImageProcessor, Binarizer, Deskewer, Denoiser
 from .detection import DBNet, DBPostProcessor
-from .detection.postprocess import sort_boxes_by_position
+from .detection.postprocess import sort_boxes_by_position, adaptive_sort_boxes, AdaptiveLineGrouper
 from .recognition import CRNN, CTCDecoder, Vocabulary
 
 
@@ -258,6 +258,8 @@ class OCRPipeline:
         # Recognition girdi boyutlari
         self.rec_input_height = model_cfg.get('input_height', 32)
         self.rec_input_width = model_cfg.get('input_width', 256)
+        self.rec_max_width = model_cfg.get('max_width', 512)
+        self.variable_width = inf_cfg.get('variable_width', True)
     
     def recognize(
         self,
@@ -294,7 +296,8 @@ class OCRPipeline:
         # Detection
         if not recognize_only:
             boxes = self._detect(image)
-            boxes = sort_boxes_by_position(boxes)
+            # Adaptif siralama (satir gruplama ile)
+            boxes = adaptive_sort_boxes(boxes)
         
         if detect_only or boxes is None or len(boxes) == 0:
             processing_time = time.time() - start_time
@@ -362,61 +365,180 @@ class OCRPipeline:
     def _recognize(
         self,
         image: np.ndarray,
-        boxes: List[np.ndarray]
+        boxes: List[np.ndarray],
+        batch_size: int = 32
     ) -> List[TextBox]:
-        """Tespit edilen bolgelerdeki metni tanir"""
-        text_boxes = []
+        """
+        Tespit edilen bolgelerdeki metni tanir (Batch processing)
         
-        for box in boxes:
-            # Bolgeyi kes
-            crop = self.image_processor.crop_polygon(
-                image, box,
-                target_height=self.rec_input_height
+        Args:
+            image: Kaynak gorsel
+            boxes: Tespit edilen kutular
+            batch_size: Batch boyutu
+            
+        Returns:
+            TextBox listesi
+        """
+        from .detection.postprocess import correct_box_rotation
+        
+        if len(boxes) == 0:
+            return []
+        
+        # 1. Tum crop'lari hazirla
+        crops = []
+        valid_indices = []
+        
+        for i, box in enumerate(boxes):
+            try:
+                # Per-region rotation correction
+                crop, _ = correct_box_rotation(image, box, angle_threshold=5.0)
+                
+                if crop.size == 0:
+                    crops.append(None)
+                    continue
+                
+                # Grayscale'e cevir
+                if len(crop.shape) == 3:
+                    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                else:
+                    gray = crop
+                
+                # Yuksekligi ayarla
+                h, w = gray.shape[:2]
+                scale = self.rec_input_height / h
+                new_w = int(w * scale)
+                gray = cv2.resize(gray, (new_w, self.rec_input_height))
+                
+                crops.append(gray)
+                valid_indices.append(i)
+                
+            except Exception:
+                crops.append(None)
+        
+        # 2. Batch halinde isle
+        text_boxes = [TextBox(box=box, text="", confidence=0.0) for box in boxes]
+        
+        # Valid crop'lari batch'le
+        valid_crops = [(valid_indices[j], crops[valid_indices[j]]) 
+                       for j in range(len(valid_indices)) if crops[valid_indices[j]] is not None]
+        
+        if not valid_crops:
+            return text_boxes
+        
+        # Batch'lere bol
+        for batch_start in range(0, len(valid_crops), batch_size):
+            batch_items = valid_crops[batch_start:batch_start + batch_size]
+            batch_indices = [item[0] for item in batch_items]
+            batch_crops = [item[1] for item in batch_items]
+            
+            # Batch icindeki tum crop'lari ayni genislige getir
+            # Variable width: max_width'e kadar izin ver
+            target_width = self.rec_max_width if self.variable_width else self.rec_input_width
+            max_width = min(
+                max(crop.shape[1] for crop in batch_crops),
+                target_width
             )
             
-            if crop.size == 0:
-                text_boxes.append(TextBox(box=box, text="", confidence=0.0))
-                continue
+            # Batch tensor olustur
+            batch_tensors = []
+            for crop in batch_crops:
+                # Truncate veya pad
+                h, w = crop.shape[:2]
+                if w > max_width:
+                    crop = crop[:, :max_width]
+                elif w < max_width:
+                    padded = np.zeros((h, max_width), dtype=crop.dtype)
+                    padded[:, :w] = crop
+                    crop = padded
+                
+                # Normalize
+                normalized = crop.astype(np.float32) / 255.0
+                batch_tensors.append(normalized)
             
-            # Grayscale'e cevir
-            if len(crop.shape) == 3:
-                gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-            else:
-                gray = crop
+            # Stack: [B, H, W] -> [B, 1, H, W]
+            batch_tensor = np.stack(batch_tensors, axis=0)
+            batch_tensor = torch.from_numpy(batch_tensor).unsqueeze(1)
+            batch_tensor = batch_tensor.to(self.device)
             
-            # Pad to width
-            padded = self.image_processor.pad_to_width(
-                gray,
-                self.rec_input_width,
-                pad_value=0
-            )
-            
-            # Normalize
-            normalized = padded.astype(np.float32) / 255.0
-            
-            # Tensor'e cevir: [B, C, H, W]
-            tensor = torch.from_numpy(normalized).unsqueeze(0).unsqueeze(0)
-            tensor = tensor.to(self.device)
-            
-            # Recognition
-            log_probs = self.recognition_model(tensor)
+            # Recognition (single forward pass for batch)
+            log_probs = self.recognition_model(batch_tensor)
             
             # Decode
             texts = self.decoder.decode_greedy(log_probs)
-            text = texts[0] if texts else ""
             
-            # Confidence (ortalama max probability)
+            # Confidence hesapla
             probs = torch.exp(log_probs)
-            max_probs, _ = probs.max(dim=2)
-            confidence = float(max_probs.mean())
+            max_probs, _ = probs.max(dim=2)  # [B, T]
+            confidences = max_probs.mean(dim=1).cpu().numpy()  # [B]
             
-            text_boxes.append(TextBox(
-                box=box,
-                text=text,
-                confidence=confidence
-            ))
+            # Sonuclari yerlestir
+            for j, (idx, text) in enumerate(zip(batch_indices, texts)):
+                text_boxes[idx] = TextBox(
+                    box=boxes[idx],
+                    text=text,
+                    confidence=float(confidences[j])
+                )
         
         return text_boxes
+    
+    @torch.no_grad()
+    def _recognize_single(
+        self,
+        image: np.ndarray,
+        box: np.ndarray
+    ) -> Tuple[str, float]:
+        """
+        Tek bir kutu icin recognition (eski yontem, yedek olarak)
+        
+        Args:
+            image: Kaynak gorsel
+            box: Kutu koordinatlari
+            
+        Returns:
+            (text, confidence) tuple
+        """
+        # Bolgeyi kes
+        crop = self.image_processor.crop_polygon(
+            image, box,
+            target_height=self.rec_input_height
+        )
+        
+        if crop.size == 0:
+            return "", 0.0
+        
+        # Grayscale'e cevir
+        if len(crop.shape) == 3:
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = crop
+        
+        # Pad to width
+        padded = self.image_processor.pad_to_width(
+            gray,
+            self.rec_input_width,
+            pad_value=0
+        )
+        
+        # Normalize
+        normalized = padded.astype(np.float32) / 255.0
+        
+        # Tensor'e cevir: [B, C, H, W]
+        tensor = torch.from_numpy(normalized).unsqueeze(0).unsqueeze(0)
+        tensor = tensor.to(self.device)
+        
+        # Recognition
+        log_probs = self.recognition_model(tensor)
+        
+        # Decode
+        texts = self.decoder.decode_greedy(log_probs)
+        text = texts[0] if texts else ""
+        
+        # Confidence
+        probs = torch.exp(log_probs)
+        max_probs, _ = probs.max(dim=2)
+        confidence = float(max_probs.mean())
+        
+        return text, confidence
     
     def visualize(
         self,

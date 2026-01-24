@@ -350,6 +350,155 @@ class RecognitionAugmentor:
         return cv2.warpAffine(image, matrix, (new_w, h))
 
 
+class DetectionAugmentor:
+    """
+    Detection egitimi icin ozellestirilmis augmentation
+    
+    - Kutulari da donusturur
+    - Geometrik + fotometrik augmentations
+    - Windows uyumlu (OpenCV multiprocessing sorunu yok)
+    """
+    
+    def __init__(
+        self,
+        rotation_range: Tuple[float, float] = (-15, 15),
+        scale_range: Tuple[float, float] = (0.8, 1.2),
+        flip_prob: float = 0.5,
+        brightness_range: Tuple[float, float] = (0.7, 1.3),
+        contrast_range: Tuple[float, float] = (0.8, 1.2),
+        noise_prob: float = 0.2,
+        blur_prob: float = 0.2
+    ):
+        self.rotation_range = rotation_range
+        self.scale_range = scale_range
+        self.flip_prob = flip_prob
+        self.brightness_range = brightness_range
+        self.contrast_range = contrast_range
+        self.noise_prob = noise_prob
+        self.blur_prob = blur_prob
+    
+    def __call__(
+        self,
+        image: np.ndarray,
+        boxes: List[np.ndarray]
+    ) -> Tuple[np.ndarray, List[np.ndarray]]:
+        """
+        Augmentation uygula
+        
+        Args:
+            image: BGR gorsel [H, W, 3]
+            boxes: Polygon listesi, her biri [4, 2] veya [N, 2]
+            
+        Returns:
+            Augmented gorsel ve kutular
+        """
+        h, w = image.shape[:2]
+        
+        # Horizontal flip
+        if random.random() < self.flip_prob:
+            image = cv2.flip(image, 1)
+            boxes = [self._flip_box_horizontal(box, w) for box in boxes]
+        
+        # Random rotation
+        if random.random() < 0.5:
+            angle = random.uniform(*self.rotation_range)
+            image, boxes = self._rotate(image, boxes, angle)
+        
+        # Random scale
+        if random.random() < 0.3:
+            scale = random.uniform(*self.scale_range)
+            image, boxes = self._scale(image, boxes, scale)
+        
+        # Brightness
+        if random.random() < 0.5:
+            factor = random.uniform(*self.brightness_range)
+            image = np.clip(image.astype(np.float32) * factor, 0, 255).astype(np.uint8)
+        
+        # Contrast
+        if random.random() < 0.3:
+            factor = random.uniform(*self.contrast_range)
+            mean = np.mean(image)
+            image = np.clip((image.astype(np.float32) - mean) * factor + mean, 0, 255).astype(np.uint8)
+        
+        # Gaussian noise
+        if random.random() < self.noise_prob:
+            std = random.uniform(5, 20)
+            noise = np.random.normal(0, std, image.shape).astype(np.float32)
+            image = np.clip(image.astype(np.float32) + noise, 0, 255).astype(np.uint8)
+        
+        # Blur (safe version)
+        if random.random() < self.blur_prob:
+            ksize = random.choice([3, 5])
+            image = cv2.GaussianBlur(image, (ksize, ksize), 0)
+        
+        # Color jitter
+        if random.random() < 0.3 and len(image.shape) == 3:
+            # HSV space manipulation
+            hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV).astype(np.float32)
+            hsv[:, :, 0] = (hsv[:, :, 0] + random.uniform(-10, 10)) % 180  # Hue
+            hsv[:, :, 1] = np.clip(hsv[:, :, 1] * random.uniform(0.8, 1.2), 0, 255)  # Saturation
+            image = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+        
+        return image, boxes
+    
+    def _flip_box_horizontal(self, box: np.ndarray, width: int) -> np.ndarray:
+        """Kutuyu yatay flip et"""
+        flipped = box.copy()
+        flipped[:, 0] = width - box[:, 0]
+        return flipped
+    
+    def _rotate(
+        self,
+        image: np.ndarray,
+        boxes: List[np.ndarray],
+        angle: float
+    ) -> Tuple[np.ndarray, List[np.ndarray]]:
+        """Gorsel ve kutulari dondur"""
+        h, w = image.shape[:2]
+        center = (w / 2, h / 2)
+        
+        # Rotation matrix
+        matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+        
+        # Gorsel boyutunu ayarla (kesilmesin)
+        cos = np.abs(matrix[0, 0])
+        sin = np.abs(matrix[0, 1])
+        new_w = int(h * sin + w * cos)
+        new_h = int(h * cos + w * sin)
+        
+        # Matrix'i guncelle
+        matrix[0, 2] += (new_w - w) / 2
+        matrix[1, 2] += (new_h - h) / 2
+        
+        # Gorseli dondur
+        rotated = cv2.warpAffine(image, matrix, (new_w, new_h), borderValue=(128, 128, 128))
+        
+        # Kutulari dondur
+        new_boxes = []
+        for box in boxes:
+            ones = np.ones((box.shape[0], 1))
+            points = np.hstack([box, ones])
+            new_points = (matrix @ points.T).T
+            new_boxes.append(new_points.astype(np.float32))
+        
+        return rotated, new_boxes
+    
+    def _scale(
+        self,
+        image: np.ndarray,
+        boxes: List[np.ndarray],
+        scale: float
+    ) -> Tuple[np.ndarray, List[np.ndarray]]:
+        """Gorsel ve kutulari olcekle"""
+        h, w = image.shape[:2]
+        new_h, new_w = int(h * scale), int(w * scale)
+        
+        scaled = cv2.resize(image, (new_w, new_h))
+        scaled_boxes = [box * scale for box in boxes]
+        
+        return scaled, scaled_boxes
+
+
 def create_augmentation_pipeline(
     for_detection: bool = True,
     strength: str = 'medium'
