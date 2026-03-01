@@ -4,8 +4,57 @@ CTC Decoder - Model cikislarindan metin uretme
 
 import torch
 import numpy as np
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 from .vocab import Vocabulary
+
+
+class UnigramLM:
+    """
+    Kelime duzeyinde tek-gram dil modeli.
+
+    CTC prefix beam search sonuclarini kelime frekansina gore
+    yeniden puanlar: final = ctc_score + lm_weight * sum(log P(word)).
+
+    Kullanim::
+        lm = UnigramLM.from_file('data/tr_frequency_dict.txt')
+        decoder = CTCPrefixDecoder(vocab, beam_width=10)
+        decoder.set_lm(lm, lm_weight=0.3)
+    """
+
+    def __init__(
+        self,
+        word_log_probs: Optional[Dict[str, float]] = None,
+        unk_log_prob: float = -10.0,
+    ):
+        self.word_log_probs: Dict[str, float] = word_log_probs or {}
+        self.unk_log_prob = unk_log_prob
+
+    @classmethod
+    def from_file(cls, path: str, max_words: int = 200_000) -> 'UnigramLM':
+        """Frekans sozlugundan yukle (format: '<kelime>\\t<frekans>' veya boslukla ayrilmis)"""
+        word_freqs: Dict[str, float] = {}
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    try:
+                        word_freqs[parts[0].lower()] = float(parts[1])
+                    except ValueError:
+                        continue
+                if len(word_freqs) >= max_words:
+                    break
+        total = sum(word_freqs.values()) or 1.0
+        log_probs = {w: float(np.log(c / total)) for w, c in word_freqs.items()}
+        return cls(log_probs)
+
+    def score(self, word: str) -> float:
+        """Kelimenin log-olasiligini dondur"""
+        return self.word_log_probs.get(word.lower(), self.unk_log_prob)
+
+    def score_text(self, text: str) -> float:
+        """Metindeki tum kelimelerin log-olasiliklari toplami"""
+        words = text.strip().split()
+        return sum(self.score(w) for w in words) if words else 0.0
 
 
 class CTCDecoder:
@@ -123,6 +172,13 @@ class CTCPrefixDecoder:
         self.vocab = vocab
         self.beam_width = beam_width
         self.blank_idx = blank_idx if blank_idx is not None else vocab.blank_idx
+        self.lm: Optional[UnigramLM] = None
+        self.lm_weight: float = 0.3
+
+    def set_lm(self, lm: UnigramLM, lm_weight: float = 0.3) -> None:
+        """Unigram dil modelini etkinlestir."""
+        self.lm = lm
+        self.lm_weight = lm_weight
     
     def decode(
         self,
@@ -207,18 +263,34 @@ class CTCPrefixDecoder:
             for prefix, _ in scored[:self.beam_width]:
                 beams[prefix] = new_beams[prefix]
         
-        # En iyi sonucu al
+        # En iyi sonucu al (opsiyonel LM ile yeniden puanlama)
         if not beams:
             return "", float('-inf')
-        
-        best_prefix = max(
-            beams.keys(),
-            key=lambda p: np.logaddexp(beams[p][0], beams[p][1])
-        )
-        best_score = np.logaddexp(beams[best_prefix][0], beams[best_prefix][1])
-        
+
+        if self.lm is not None:
+            # Tum beam adaylari uzerinde CTC + LM birlesik puani hesapla
+            best_prefix: tuple = ()
+            best_combined = float('-inf')
+            best_ctc_score = float('-inf')
+            for prefix, (pb, pnb) in beams.items():
+                ctc_score = np.logaddexp(pb, pnb)
+                candidate = self.vocab.decode(list(prefix), remove_blank=True)
+                lm_score = self.lm.score_text(candidate)
+                combined = ctc_score + self.lm_weight * lm_score
+                if combined > best_combined:
+                    best_combined = combined
+                    best_prefix = prefix
+                    best_ctc_score = ctc_score
+            best_score = best_ctc_score
+        else:
+            best_prefix = max(
+                beams.keys(),
+                key=lambda p: np.logaddexp(beams[p][0], beams[p][1])
+            )
+            best_score = np.logaddexp(beams[best_prefix][0], beams[best_prefix][1])
+
         text = self.vocab.decode(list(best_prefix), remove_blank=True)
-        
+
         return text, best_score
     
     def decode_batch(

@@ -128,36 +128,6 @@ class Denoiser:
         
         return result
     
-    def enhance_text(self, image: np.ndarray) -> np.ndarray:
-        """
-        Metin okunurlugunu arttirir
-        
-        Args:
-            image: Giris gorseli
-            
-        Returns:
-            Gelistirilmis gorsel
-        """
-        # Gri tonlama
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = image.copy()
-        
-        # CLAHE (Contrast Limited Adaptive Histogram Equalization)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(gray)
-        
-        # Sharpening
-        kernel = np.array([
-            [-1, -1, -1],
-            [-1,  9, -1],
-            [-1, -1, -1]
-        ])
-        enhanced = cv2.filter2D(enhanced, -1, kernel)
-        
-        return enhanced
-    
     def auto_adjust(
         self,
         image: np.ndarray

@@ -86,6 +86,25 @@ class RecognitionAugmentor:
             if random.random() < 0.15:
                 image = self.shear(image)
 
+            # CutOut: rastgele dikdortgen maskeleme
+            if random.random() < 0.25:
+                h, w = image.shape[:2]
+                rh = random.randint(h // 4, h // 2)
+                rw = random.randint(w // 8, max(w // 4, 1))
+                x0 = random.randint(0, max(1, w - rw))
+                y0 = random.randint(0, max(1, h - rh))
+                fill_val = random.randint(64, 192)
+                image[y0:y0 + rh, x0:x0 + rw] = fill_val
+
+            # JPEG sikistirma artifaktlari
+            if random.random() < 0.2:
+                quality = random.randint(30, 80)
+                _, buf = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, quality])
+                read_flag = cv2.IMREAD_GRAYSCALE if image.ndim == 2 else cv2.IMREAD_COLOR
+                decoded = cv2.imdecode(buf, read_flag)
+                if decoded is not None and decoded.shape == image.shape:
+                    image = decoded
+
         except Exception as e:
             # Herhangi bir hata durumunda orijinal gorseli dondur
             import logging

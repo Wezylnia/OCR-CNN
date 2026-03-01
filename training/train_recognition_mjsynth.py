@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import OneCycleLR
+from torch.optim.lr_scheduler import OneCycleLR, ReduceLROnPlateau
 from tqdm import tqdm
 import numpy as np
 import random
@@ -91,7 +91,7 @@ class AdvancedTrainer:
             hidden_size=model_cfg.get('hidden_size', 256),
             num_layers=model_cfg.get('num_layers', 2),
             dropout=model_cfg.get('dropout', 0.1),
-            encoder_type='vgg'
+            encoder_type=model_cfg.get('encoder_type', 'vgg')
         ).to(self.device)
         
         # Loss & Decoder
@@ -108,6 +108,7 @@ class AdvancedTrainer:
         self.epoch = 0
         self.global_step = 0
         self.scheduler = None  # train() icinde olusturulacak
+        self.plateau_scheduler = None  # val mevcut oldugunda ReduceLROnPlateau
         
         # Model parametreleri
         total_params = sum(p.numel() for p in self.model.parameters())
@@ -149,7 +150,7 @@ class AdvancedTrainer:
             self.optimizer.zero_grad()
             
             if self.use_amp:
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast('cuda'):
                     log_probs = self.model(images)
                     
                     # CTC Loss
@@ -278,15 +279,27 @@ class AdvancedTrainer:
         save_dir = Path(save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
         
-        # Scheduler
-        self.scheduler = OneCycleLR(
-            self.optimizer,
-            max_lr=self.lr,
-            epochs=epochs,
-            steps_per_epoch=len(train_loader),
-            pct_start=0.1,
-            anneal_strategy='cos'
-        )
+        # Scheduler secimi
+        if val_loader:
+            # Validation varsa: ReduceLROnPlateau (val_loss izler, per-step yok)
+            self.scheduler = None
+            self.plateau_scheduler = ReduceLROnPlateau(
+                self.optimizer, mode='min', factor=0.5,
+                patience=3, min_lr=1e-7, verbose=True
+            )
+            print("[LR] ReduceLROnPlateau aktif (val_loss izleniyor, patience=3)")
+        else:
+            # Validation yoksa: OneCycleLR
+            self.scheduler = OneCycleLR(
+                self.optimizer,
+                max_lr=self.lr,
+                epochs=epochs,
+                steps_per_epoch=len(train_loader),
+                pct_start=0.1,
+                anneal_strategy='cos'
+            )
+            self.plateau_scheduler = None
+            print("[LR] OneCycleLR aktif")
         
         print("\n" + "="*70)
         print(f"EGITIM BASLIYOR")
@@ -343,6 +356,10 @@ class AdvancedTrainer:
                     self.best_val_acc = val_metrics['word_acc']
                     self.save_checkpoint(save_dir / 'best_model.pth')
                     print(f"\n  [KAYIT] Yeni en iyi model! Val Acc: {self.best_val_acc*100:.2f}%")
+
+                # ReduceLROnPlateau adimi
+                if self.plateau_scheduler is not None:
+                    self.plateau_scheduler.step(val_metrics['loss'])
             
             # Her epoch checkpoint kaydet (uzun suruyor)
             self.save_checkpoint(save_dir / f'checkpoint_epoch_{epoch}.pth')
@@ -375,6 +392,7 @@ class AdvancedTrainer:
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
+            'plateau_scheduler_state_dict': self.plateau_scheduler.state_dict() if self.plateau_scheduler else None,
             'best_val_acc': self.best_val_acc,
             'global_step': self.global_step,
             'vocab_size': self.vocab.size

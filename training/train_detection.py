@@ -20,7 +20,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.optim import Adam, AdamW, SGD
 from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR, OneCycleLR
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler
 from pathlib import Path
 from tqdm import tqdm
 from typing import Optional
@@ -160,7 +160,7 @@ class DetectionTrainer:
         self.optimizer = self._build_optimizer()
 
         # AMP Scaler
-        self.scaler = GradScaler() if self.use_amp else None
+        self.scaler = GradScaler('cuda') if self.use_amp else None
 
         # Postprocessor (validation icin)
         self.postprocessor = DBPostProcessor(
@@ -222,16 +222,6 @@ class DetectionTrainer:
             eta_min=1e-6
         )
 
-    def _build_scheduler(self, num_training_steps: int, warmup_steps: int = 0):
-        """LambdaLR scheduler olustur (warmup + cosine decay, per-step)"""
-        def lr_lambda(step):
-            if step < warmup_steps:
-                return float(step) / float(max(1, warmup_steps))
-            progress = float(step - warmup_steps) / float(max(1, num_training_steps - warmup_steps))
-            return max(0.0, 0.5 * (1.0 + np.cos(np.pi * progress)))
-
-        return torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
-    
     def train_epoch(self, dataloader: DataLoader, scheduler=None) -> dict:
         """Bir epoch egit (AMP destekli)"""
         self.model.train()
@@ -257,7 +247,7 @@ class DetectionTrainer:
             self.optimizer.zero_grad()
 
             if self.use_amp:
-                with autocast():
+                with torch.amp.autocast('cuda'):
                     outputs = self.model(images, return_maps=True)
                     losses = self.criterion(outputs, gt_prob, gt_thresh, mask)
                     loss = losses['total_loss']
@@ -324,7 +314,7 @@ class DetectionTrainer:
 
             # Forward
             if self.use_amp:
-                with autocast():
+                with torch.amp.autocast('cuda'):
                     outputs = self.model(images, return_maps=True)
                     losses = self.criterion(outputs, gt_prob, gt_thresh, mask)
             else:
@@ -397,11 +387,6 @@ class DetectionTrainer:
             self.scheduler.load_state_dict(self._pending_scheduler_state)
             self._pending_scheduler_state = None
 
-        # Per-step scheduler (warmup + cosine decay)
-        total_steps = epochs * len(train_loader)
-        warmup_steps = int(warmup_epochs * len(train_loader))
-        step_scheduler = self._build_scheduler(total_steps, warmup_steps)
-
         train_cfg = self.config.get('training', {}).get('detection', {})
         save_interval = train_cfg.get('save_interval', 10)
         val_interval = train_cfg.get('val_interval', 5)
@@ -413,8 +398,6 @@ class DetectionTrainer:
         print(f"Train samples: {len(train_loader.dataset)}")
         print(f"Val samples: {len(val_loader.dataset) if val_loader else 0}")
         print(f"Batch size: {train_loader.batch_size}")
-        print(f"Total steps: {total_steps}")
-        print(f"Warmup steps: {warmup_steps}")
         print(f"Save directory: {save_dir}")
         print(f"{'='*60}\n")
 
@@ -429,7 +412,7 @@ class DetectionTrainer:
             print(f"{'='*60}")
 
             # Egit
-            train_metrics = self.train_epoch(train_loader, step_scheduler)
+            train_metrics = self.train_epoch(train_loader)
 
             print(f"\n[TRAIN] Loss: {train_metrics['total_loss']:.4f}")
             print(f"  - Prob Loss: {train_metrics['prob_loss']:.4f}")

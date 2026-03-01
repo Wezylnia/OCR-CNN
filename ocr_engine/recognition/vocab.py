@@ -24,6 +24,8 @@ class Vocabulary:
         ".,;:!?-'\"()[]{}/"
         # Ozel karakterler
         "@#$%&*+=<>~`\\|^_"
+        # Para birimi ve tipografi karakterleri
+        "\u20ba\u20ac\u00a3\u2014\u2013\u2026\u201c\u201d\u2018\u2019\u00b0\u00d7\u00f7\u00b1\u00b2\u00b3\u00bd\u00bc"
         # Bosluk
         " "
     )

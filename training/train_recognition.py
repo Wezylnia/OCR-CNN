@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.optim import Adam, AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR, OneCycleLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, OneCycleLR, ReduceLROnPlateau
 from pathlib import Path
 from tqdm import tqdm
 import numpy as np
@@ -52,6 +52,7 @@ class RecognitionTrainer:
         
         # Scheduler
         self.scheduler = None  # train() icinde olusturulacak
+        self.plateau_scheduler = None  # val mevcut oldugunda ReduceLROnPlateau
         
         # Metrikler
         self.best_accuracy = 0.0
@@ -67,7 +68,7 @@ class RecognitionTrainer:
             hidden_size=model_cfg.get('hidden_size', 256),
             num_layers=model_cfg.get('num_layers', 2),
             dropout=model_cfg.get('dropout', 0.1),
-            encoder_type='vgg'
+            encoder_type=model_cfg.get('encoder_type', 'vgg')
         )
         
         return model.to(self.device)
@@ -215,7 +216,8 @@ class RecognitionTrainer:
         train_loader: DataLoader,
         val_loader: DataLoader = None,
         epochs: int = 100,
-        save_dir: str = 'checkpoints'
+        save_dir: str = 'checkpoints',
+        freeze_encoder_epochs: int = 0,
     ):
         """Egitim dongusu"""
         save_dir = Path(save_dir)
@@ -225,17 +227,44 @@ class RecognitionTrainer:
         save_interval = train_cfg.get('save_interval', 10)
         val_interval = train_cfg.get('val_interval', 5)
         
-        # OneCycle scheduler
-        self.scheduler = OneCycleLR(
-            self.optimizer,
-            max_lr=train_cfg.get('learning_rate', 0.001),
-            epochs=epochs,
-            steps_per_epoch=len(train_loader),
-            pct_start=0.1
-        )
+        # Scheduler secimi
+        if val_loader:
+            # Validation varsa: ReduceLROnPlateau (val_loss izler, per-step yok)
+            self.scheduler = None
+            self.plateau_scheduler = ReduceLROnPlateau(
+                self.optimizer,
+                mode='min',
+                factor=0.5,
+                patience=5,
+                min_lr=1e-7,
+                verbose=True,
+            )
+            print("[LR] ReduceLROnPlateau aktif (val_loss izleniyor, patience=5)")
+        else:
+            # Validation yoksa: OneCycleLR (per-step)
+            self.scheduler = OneCycleLR(
+                self.optimizer,
+                max_lr=train_cfg.get('learning_rate', 0.001),
+                epochs=epochs,
+                steps_per_epoch=len(train_loader),
+                pct_start=0.1
+            )
+            self.plateau_scheduler = None
+            print("[LR] OneCycleLR aktif")
         
         for epoch in range(epochs):
             self.epoch = epoch + 1
+
+            # --- Encoder dondurma / cozme (2-asamali fine-tune icin) ---
+            if freeze_encoder_epochs > 0:
+                if epoch == 0:
+                    for p in self.model.encoder.parameters():
+                        p.requires_grad = False
+                    print(f"[FREEZE] CNN encoder donduruldu ({freeze_encoder_epochs} epoch)")
+                elif epoch == freeze_encoder_epochs:
+                    for p in self.model.encoder.parameters():
+                        p.requires_grad = True
+                    print(f"[UNFREEZE] Epoch {self.epoch}: CNN encoder aktiflestirildi")
             
             # Egit
             train_metrics = self.train_epoch(train_loader)
@@ -248,6 +277,10 @@ class RecognitionTrainer:
                 print(f"Val Loss: {val_metrics['val_loss']:.4f}, "
                       f"Accuracy: {val_metrics['accuracy']*100:.1f}%, "
                       f"Char Acc: {val_metrics['char_accuracy']*100:.1f}%")
+
+                # ReduceLROnPlateau adimi
+                if self.plateau_scheduler is not None:
+                    self.plateau_scheduler.step(val_metrics['val_loss'])
                 
                 # En iyi modeli kaydet
                 if val_metrics['accuracy'] > self.best_accuracy:
@@ -270,6 +303,7 @@ class RecognitionTrainer:
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
+            'plateau_scheduler_state_dict': self.plateau_scheduler.state_dict() if self.plateau_scheduler else None,
             'best_accuracy': self.best_accuracy,
             'vocab': {
                 'chars': self.vocab.chars,
@@ -278,6 +312,28 @@ class RecognitionTrainer:
             }
         }, path)
     
+    def load_pretrained(self, path: str) -> None:
+        """
+        Stage-1 pretrained agirliklarini yukle.
+
+        Sadece model agirliklarini yukler; optimizer, scheduler ve epoch
+        sifirlanir. 2-asamali egitim icin:
+          Stage 1: train_recognition_mjsynth.py  -> best_model.pth
+          Stage 2: train_recognition.py --pretrain best_model.pth
+                                         --freeze_encoder_epochs 5
+        """
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        state = checkpoint.get('model_state_dict', checkpoint.get('model', checkpoint))
+        missing, unexpected = self.model.load_state_dict(state, strict=False)
+        print(f"Pretrained agirliklar yuklendi: {path}")
+        if missing:
+            print(f"  Eksik katmanlar: {len(missing)}")
+        if unexpected:
+            print(f"  Beklenmeyen katmanlar: {len(unexpected)}")
+        # Epoch ve metrikler sifirlanir (yeni fine-tune baslangici)
+        self.epoch = 0
+        self.best_accuracy = 0.0
+
     def load_checkpoint(self, path: str):
         """Checkpoint yukle"""
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
@@ -288,6 +344,8 @@ class RecognitionTrainer:
         self.best_accuracy = checkpoint['best_accuracy']
         if checkpoint.get('scheduler_state_dict') and self.scheduler is not None:
             self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        if checkpoint.get('plateau_scheduler_state_dict') and self.plateau_scheduler is not None:
+            self.plateau_scheduler.load_state_dict(checkpoint['plateau_scheduler_state_dict'])
         print(f"Checkpoint yuklendi: epoch {self.epoch}, best_acc {self.best_accuracy*100:.1f}%")
 
 
@@ -302,6 +360,10 @@ def main():
     parser.add_argument('--synthetic_ratio', type=float, default=1.0, 
                         help='Sentetik veri orani (0-1, 1=tamamen sentetik)')
     parser.add_argument('--resume', type=str, default=None, help='Checkpoint yolu')
+    parser.add_argument('--pretrain', type=str, default=None,
+                        help='Stage-1 pretrained agirlik (sadece model yukle, optimizer sifirla)')
+    parser.add_argument('--freeze_encoder_epochs', type=int, default=0,
+                        help='Bu kadar epoch CNN encoder dondur (2-asamali fine-tune icin)')
     parser.add_argument('--save_dir', type=str, default='checkpoints', help='Kayit klasoru')
     parser.add_argument('--device', type=str, default='cuda', help='Cihaz')
     
@@ -361,16 +423,19 @@ def main():
     # Trainer
     trainer = RecognitionTrainer(config, vocab=vocab, device=args.device)
     
-    # Resume
+    # Resume veya pretrain
     if args.resume:
         trainer.load_checkpoint(args.resume)
+    elif args.pretrain:
+        trainer.load_pretrained(args.pretrain)
     
     # Egit
     trainer.train(
         train_loader=train_loader,
         val_loader=val_loader,
         epochs=args.epochs,
-        save_dir=args.save_dir
+        save_dir=args.save_dir,
+        freeze_encoder_epochs=args.freeze_encoder_epochs,
     )
 
 

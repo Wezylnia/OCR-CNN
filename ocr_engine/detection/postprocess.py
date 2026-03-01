@@ -80,6 +80,9 @@ class DBPostProcessor:
             cv2.CHAIN_APPROX_SIMPLE
         )
         
+        # Alan buyuklugune gore sirala: en buyuk (olasi metin bolgeleri) once gelsin
+        contours = sorted(contours, key=cv2.contourArea, reverse=True)
+
         boxes = []
         scores = []
         

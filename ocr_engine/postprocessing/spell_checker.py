@@ -49,7 +49,33 @@ class SpellChecker:
         
         # Kelime frekanslari (varsa)
         self.word_frequencies: Dict[str, int] = {}
-    
+
+        # SymSpell entegrasyonu (varsa)
+        self._symspell = None
+        self._try_load_symspell()
+
+    def _try_load_symspell(self) -> None:
+        """symspellpy ile hizli sozluk yukle (varsa)"""
+        try:
+            from symspellpy import SymSpell
+            from pathlib import Path
+            sym = SymSpell(max_dictionary_edit_distance=self.max_edit_distance)
+            loaded = False
+            langs = ['tr', 'en'] if self.language == 'both' else [self.language]
+            for lang in langs:
+                dict_path = (
+                    Path(__file__).parent.parent.parent / 'data' / f'{lang}_frequency_dict.txt'
+                )
+                if dict_path.exists():
+                    sym.load_dictionary(str(dict_path), term_index=0, count_index=1)
+                    loaded = True
+            if loaded:
+                self._symspell = sym
+        except ImportError:
+            pass
+        except Exception:
+            pass
+
     def _load_default_dictionary(self) -> Set[str]:
         """Varsayilan sozluk yukle"""
         # Basit Turkce kelimeler
@@ -142,7 +168,20 @@ class SpellChecker:
             Onerilen duzeltme veya None
         """
         word_lower = word.lower()
-        
+
+        # symspellpy ile hizli arama
+        if self._symspell is not None:
+            try:
+                suggestions = self._symspell.lookup(
+                    word_lower,
+                    verbosity=0,
+                    max_edit_distance=self.max_edit_distance
+                )
+                if suggestions:
+                    return self._preserve_case(word, suggestions[0].term)
+            except Exception:
+                pass
+
         # Zaten dogru mu?
         if word_lower in self.dictionary:
             return word

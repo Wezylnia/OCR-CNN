@@ -10,7 +10,7 @@ from pathlib import Path
 import yaml
 
 from .pipeline_types import TextBox, OCRResult
-from .preprocessing import ImageProcessor, Binarizer, Deskewer, Denoiser, ImageEnhancer
+from .preprocessing import ImageProcessor, Binarizer, Deskewer, Denoiser, ImageEnhancer, PerspectiveCorrector
 from .detection import DBNet, DBPostProcessor
 from .detection.postprocess import sort_boxes_by_position, adaptive_sort_boxes, AdaptiveLineGrouper
 from .recognition import (
@@ -150,7 +150,17 @@ class OCRPipeline:
             self._enhance_sharpness_threshold = enh_cfg.get('auto_sharpness_threshold', 50.0)
         else:
             self.enhancer = None
-    
+
+        # Perspektif duzeltici
+        persp_cfg = preproc_cfg.get('perspective', {})
+        if persp_cfg.get('enabled', True):
+            self.perspective_corrector = PerspectiveCorrector(
+                min_area_ratio=persp_cfg.get('min_area_ratio', 0.1),
+                max_angle_deviation=persp_cfg.get('max_angle_deviation', 30.0),
+            )
+        else:
+            self.perspective_corrector = None
+
     def _init_detection(self, weights_path: Optional[str]):
         """Detection modelini baslat"""
         det_cfg = self.config.get('detection', {})
@@ -391,6 +401,10 @@ class OCRPipeline:
         # Gurultu gider
         if self.denoiser is not None:
             image = self.denoiser.denoise(image)
+
+        # Perspektif duzelt (kamera fotolari icin)
+        if self.perspective_corrector is not None:
+            image = self.perspective_corrector.correct(image)
 
         # Aci duzelt
         if self.deskewer is not None:

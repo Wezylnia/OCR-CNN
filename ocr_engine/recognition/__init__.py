@@ -2,7 +2,7 @@
 Recognition modulu - Metin tanima (CRNN + AttentionCRNN)
 """
 
-from .model import CRNN, CRNNLoss, build_crnn
+from .model import CRNN, CRNNLoss, build_crnn, MobileNetV3Encoder
 from .decoder import CTCDecoder
 from .vocab import Vocabulary
 from .attention import (
@@ -17,6 +17,7 @@ __all__ = [
     "CRNN",
     "CRNNLoss",
     "build_crnn",
+    "MobileNetV3Encoder",
     "CTCDecoder",
     "Vocabulary",
     "AttentionCRNN",

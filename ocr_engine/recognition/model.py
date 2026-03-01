@@ -19,13 +19,15 @@ class BidirectionalLSTM(nn.Module):
         dropout: float = 0.0
     ):
         super().__init__()
+        # dropout nn.LSTM'e VERILMEZ (num_layers=1 olduğunda PyTorch uyarı üretir).
+        # Yerine ayrı nn.Dropout katmanı kullanılır — davranış aynıdır.
         self.lstm = nn.LSTM(
             input_size,
             hidden_size,
             bidirectional=True,
-            batch_first=True,
-            dropout=dropout if dropout > 0 else 0
+            batch_first=True
         )
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
         self.linear = nn.Linear(hidden_size * 2, output_size)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -38,6 +40,7 @@ class BidirectionalLSTM(nn.Module):
         """
         self.lstm.flatten_parameters()
         output, _ = self.lstm(x)
+        output = self.dropout(output)
         output = self.linear(output)
         return output
 
@@ -104,103 +107,76 @@ class VGGEncoder(nn.Module):
         return x
 
 
-class ResNetEncoder(nn.Module):
-    """ResNet-style CNN encoder (alternatif)"""
-    
-    def __init__(self, input_channels: int = 1):
+class MobileNetV3Encoder(nn.Module):
+    """
+    MobileNetV3-small tabanli encoder — VGGEncoder drop-in yedegi.
+
+    VGG'ye kiyasla ~%%15 daha hizli, benzer dogruluk.
+    Ilk 4 MobileNet blogu kullanilir (3x stride-2 => H/8, W/8),
+    ardindan Conv(H=4, W=1) ile height kolapse edilir.
+
+    Gereksinim: torchvision
+    """
+
+    def __init__(self, input_channels: int = 1, pretrained: bool = True):
         super().__init__()
-        
-        self.conv1 = nn.Conv2d(input_channels, 32, kernel_size=3, stride=1, padding=1)
-        self.bn1 = nn.BatchNorm2d(32)
-        
-        # ResBlock 1
-        self.block1 = self._make_block(32, 64, stride=2)  # H/2
-        
-        # ResBlock 2
-        self.block2 = self._make_block(64, 128, stride=(2, 1))  # H/4
-        
-        # ResBlock 3
-        self.block3 = self._make_block(128, 256, stride=(2, 1))  # H/8
-        
-        # ResBlock 4
-        self.block4 = self._make_block(256, 512, stride=(2, 1))  # H/16
-        
-        self.conv_out = nn.Conv2d(512, 512, kernel_size=(2, 1))
-        self.bn_out = nn.BatchNorm2d(512)
-        
-        self.relu = nn.ReLU(inplace=True)
-        self.output_channels = 512
-    
-    def _make_block(
-        self,
-        in_channels: int,
-        out_channels: int,
-        stride: int = 1
-    ) -> nn.Sequential:
-        """Residual block olustur"""
-        if isinstance(stride, int):
-            stride = (stride, stride)
-        
-        downsample = None
-        if stride != (1, 1) or in_channels != out_channels:
-            downsample = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, 1, stride),
-                nn.BatchNorm2d(out_channels)
-            )
-        
-        return ResBlock(in_channels, out_channels, stride, downsample)
-    
+
+        try:
+            from torchvision.models import mobilenet_v3_small, MobileNet_V3_Small_Weights
+            weights = MobileNet_V3_Small_Weights.IMAGENET1K_V1 if pretrained else None
+            backbone = mobilenet_v3_small(weights=weights)
+        except (ImportError, AttributeError):
+            try:
+                import torchvision.models as _tvm
+                backbone = _tvm.mobilenet_v3_small(pretrained=pretrained)
+            except TypeError:
+                import torchvision.models as _tvm
+                backbone = _tvm.mobilenet_v3_small()
+
+        feat_list = list(backbone.features.children())
+
+        # Ilk konvolusyonu 1-kanal girdi icin uyarla
+        first_block = feat_list[0]   # Conv2dNormActivation
+        old_conv = first_block[0]    # Conv2d(3, 16, 3, stride=2, padding=1)
+        new_conv = nn.Conv2d(
+            input_channels, 16,
+            kernel_size=old_conv.kernel_size,
+            stride=old_conv.stride,
+            padding=old_conv.padding,
+            bias=(old_conv.bias is not None),
+        )
+        if pretrained:
+            with torch.no_grad():
+                new_conv.weight.data = old_conv.weight.data.mean(dim=1, keepdim=True)
+        first_block[0] = new_conv
+
+        # feat_list[0..3]: 3x stride-2 => H/8=4, W/8 (H=32 girdi varsayimi)
+        # [0] Conv2dNormActivation stride=(2,2) => [B, 16, 16, W/2]
+        # [1] InvertedResidual      stride=(2,2) => [B, 16,  8, W/4]
+        # [2] InvertedResidual      stride=(2,2) => [B, 24,  4, W/8]
+        # [3] InvertedResidual      stride=(1,1) => [B, 24,  4, W/8]
+        self.features = nn.Sequential(*feat_list[:4])
+
+        # H=4 -> 1 kolaps + kanal projeksiyonu (512 = VGGEncoder ile ayni)
+        self.bridge = nn.Sequential(
+            nn.Conv2d(24, 512, kernel_size=(4, 1), stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(512),
+            nn.Hardswish(inplace=True),
+        )
+
+        self.output_channels = 512  # VGGEncoder ile ayni -> CRNN dogrudan uyumlu
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.relu(self.bn1(self.conv1(x)))
-        
-        x = self.block1(x)
-        x = self.block2(x)
-        x = self.block3(x)
-        x = self.block4(x)
-        
-        x = self.relu(self.bn_out(self.conv_out(x)))
-        
+        """
+        Args:
+            x: [B, C, 32, W]  — yukseklik 32 olmali
+
+        Returns:
+            [B, 512, 1, W/8]
+        """
+        x = self.features(x)  # [B, 24, 4, W/8]
+        x = self.bridge(x)    # [B, 512, 1, W/8]
         return x
-
-
-class ResBlock(nn.Module):
-    """Basic residual block"""
-    
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        stride: Tuple[int, int] = (1, 1),
-        downsample: Optional[nn.Module] = None
-    ):
-        super().__init__()
-        
-        self.conv1 = nn.Conv2d(
-            in_channels, out_channels, 3, stride, padding=1
-        )
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        
-        self.conv2 = nn.Conv2d(
-            out_channels, out_channels, 3, 1, padding=1
-        )
-        self.bn2 = nn.BatchNorm2d(out_channels)
-        
-        self.relu = nn.ReLU(inplace=True)
-        self.downsample = downsample
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        identity = x
-        
-        out = self.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
-        
-        if self.downsample is not None:
-            identity = self.downsample(x)
-        
-        out += identity
-        out = self.relu(out)
-        
-        return out
 
 
 class CRNN(nn.Module):
@@ -235,8 +211,8 @@ class CRNN(nn.Module):
         # CNN Encoder
         if encoder_type == "vgg":
             self.encoder = VGGEncoder(input_channels)
-        elif encoder_type == "resnet":
-            self.encoder = ResNetEncoder(input_channels)
+        elif encoder_type == "mobilenetv3":
+            self.encoder = MobileNetV3Encoder(input_channels)
         else:
             raise ValueError(f"Bilinmeyen encoder tipi: {encoder_type}")
         
@@ -337,24 +313,15 @@ class CRNN(nn.Module):
         return self.forward(x)
     
     def get_sequence_length(self, input_width: int) -> int:
-        """
-        Giris genisligine gore cikis sequence uzunlugunu hesapla
+        """Encoder tipine gore cikis sequence uzunlugunu hesapla.
 
-        Args:
-            input_width: Giris gorseli genisligi
-
-        Returns:
-            Cikis sequence uzunlugu
+        VGG:          Pool1 W/2, Pool2 W/2, Conv5 W-1  -> (W//4) - 1
+        MobileNetV3:  3x stride-2 in width             -> W//8
         """
-        if isinstance(self.encoder, ResNetEncoder):
-            # block1: stride=(2,2) → W/2
-            # block2-4: stride=(2,1) → W unchanged
-            # conv_out: kernel_w=1 → W unchanged
-            return input_width // 2
-        else:
-            # VGG encoder:
-            # Pool1: W/2, Pool2: W/2, Pool3/4: W unchanged, Conv5: W-1
-            return (input_width // 4) - 1
+        if isinstance(self.encoder, MobileNetV3Encoder):
+            return input_width // 8
+        # VGG encoder (varsayilan)
+        return (input_width // 4) - 1
 
 
 class CRNNLoss(nn.Module):

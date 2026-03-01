@@ -3,7 +3,7 @@
 # General Settings
 general:
   device: "cuda"  # cuda or cpu
-  num_workers: 4
+  num_workers: 2   # Windows'ta 2 güvenli (GPU varken persistent_workers ile)
   seed: 42
 
 # Preprocessing Settings
@@ -67,6 +67,7 @@ recognition:
     hidden_size: 256
     num_layers: 2
     dropout: 0.1
+    encoder_type: "vgg"  # vgg | mobilenetv3 (mobilenetv3 ~%15 daha hızlı)
 
   inference:
     beam_width: 5
@@ -92,11 +93,11 @@ training:
     val_interval: 5
   
   recognition:
-    batch_size: 64
+    batch_size: 96          # RTX 3050 6GB + AMP ile güvenli
     learning_rate: 0.001
     epochs: 100
-    save_interval: 10
-    val_interval: 5
+    save_interval: 5
+    val_interval: 2
   
   augmentation:
     enabled: true

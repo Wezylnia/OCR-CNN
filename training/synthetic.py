@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 from typing import List, Tuple, Optional
 import random
+from PIL import Image, ImageDraw, ImageFont
 
 from ocr_engine.recognition.vocab import Vocabulary
 
@@ -53,13 +54,68 @@ class SyntheticTextGenerator:
             (128, 0, 0),      # Koyu kirmizi
         ]
         
-        # OpenCV font
-        self.fonts = [
-            cv2.FONT_HERSHEY_SIMPLEX,
-            cv2.FONT_HERSHEY_COMPLEX,
-            cv2.FONT_HERSHEY_DUPLEX,
-            cv2.FONT_HERSHEY_TRIPLEX,
-        ]
+        # Font dosya yollari - her generate() cagrisinda rastgele sec
+        self._font_paths: List[str] = self._collect_font_paths(font_paths)
+
+    def _collect_font_paths(
+        self,
+        extra_paths: Optional[List[str]] = None
+    ) -> List[str]:
+        """
+        Kullanilabilir tum TTF/OTF dosyalarini topla.
+
+        Oncelik sirasi:
+          1. Kullanici tarafindan verilen yollar
+          2. data/fonts/ (alt klasorler dahil)
+          3. C:/Windows/Fonts  (Windows sisteminde 400+ font, hepsi Turkce destekli)
+
+        Fontlar bellegde TUTULMAZ — her uretimde dosya yolundan on-the-fly acilir,
+        bu sayede bellek kullanimi minimal kalir ve maksimum cesitlilik saglanir.
+        """
+        from pathlib import Path as _Path
+        paths: List[str] = []
+
+        seen: set = set()
+
+        def add(p: str) -> None:
+            if p not in seen:
+                seen.add(p)
+                paths.append(p)
+
+        # 1. Kullanici tarafindan verilen yollar
+        if extra_paths:
+            for p in extra_paths:
+                if _Path(p).exists():
+                    add(p)
+
+        # 2. data/fonts/ (NotoSans ve diger proje fontlari)
+        fonts_dir = _Path(__file__).parent.parent / 'data' / 'fonts'
+        if fonts_dir.exists():
+            for ext in ('*.ttf', '*.otf', '*.TTF', '*.OTF'):
+                for f in sorted(fonts_dir.rglob(ext)):
+                    add(str(f))
+
+        # 3. Windows sistem fontlari (Arial, Times, Calibri, Georgia, Courier…)
+        # Sembol / dekoratif fontlar atlandi (belge OCR'da kullanilmaz)
+        _SKIP_KEYWORDS = (
+            'wing', 'ding', 'symbol', 'webding', 'marlett',
+            'mtextra', 'bssym', 'symbol', 'emoji',
+        )
+        win_fonts = _Path('C:/Windows/Fonts')
+        if win_fonts.exists():
+            for ext in ('*.ttf', '*.otf'):
+                for f in sorted(win_fonts.glob(ext)):
+                    name_lower = f.name.lower()
+                    if any(kw in name_lower for kw in _SKIP_KEYWORDS):
+                        continue
+                    add(str(f))
+
+        if not paths:
+            # Son care: PIL dahili bitmap fontu
+            return []  # generate() None kontrolu yapar
+
+        return paths
+
     
     def generate(
         self,
@@ -85,40 +141,50 @@ class SyntheticTextGenerator:
         if text is None:
             text = self._generate_random_text(min_length, max_length)
         
-        # Font sec
-        font = random.choice(self.fonts)
-        font_scale = random.uniform(0.5, 1.5)
-        thickness = random.randint(1, 2)
-        
+        # Font sec — dosya yolundan on-the-fly olustur (dusuk bellek, yuksek cesitlilik)
+        size = random.randint(self.font_sizes[0], self.font_sizes[1])
+        if self._font_paths:
+            font_path = random.choice(self._font_paths)
+            try:
+                pil_font = ImageFont.truetype(font_path, size)
+            except (IOError, OSError):
+                pil_font = ImageFont.load_default()
+        else:
+            try:
+                pil_font = ImageFont.load_default(size=size)
+            except TypeError:
+                pil_font = ImageFont.load_default()
+
         # Renkler sec
         bg_color = random.choice(self.bg_colors)
         text_color = random.choice(self.text_colors)
-        
-        # Metin boyutunu hesapla
-        (text_w, text_h), baseline = cv2.getTextSize(
-            text, font, font_scale, thickness
-        )
-        
+
+        # PIL ile metin olcut hesapla
+        dummy = ImageDraw.Draw(Image.new('RGB', (1, 1)))
+        bbox = dummy.textbbox((0, 0), text, font=pil_font)
+        text_w = max(bbox[2] - bbox[0], 1)
+        text_h = max(bbox[3] - bbox[1], 1)
+
         # Padding
         padding = random.randint(5, 15)
-        
+
         # Gorsel boyutu
-        img_h = text_h + baseline + 2 * padding
+        img_h = text_h + 2 * padding
         img_w = text_w + 2 * padding
-        
-        # Gorsel olustur
-        image = np.full((img_h, img_w, 3), bg_color, dtype=np.uint8)
-        
-        # Metin yaz
-        x = padding
-        y = padding + text_h
-        cv2.putText(image, text, (x, y), font, font_scale, text_color, thickness)
-        
+
+        # PIL gorsel olustur ve metni yaz
+        pil_img = Image.new('RGB', (img_w, img_h), bg_color)
+        draw = ImageDraw.Draw(pil_img)
+        draw.text((padding - bbox[0], padding - bbox[1]), text, font=pil_font, fill=text_color)
+
+        # numpy'a cevir
+        image = np.array(pil_img)
+
         # Hedef yukseklige boyutlandir
         scale = self.image_height / img_h
-        new_w = int(img_w * scale)
+        new_w = max(int(img_w * scale), 1)
         image = cv2.resize(image, (new_w, self.image_height))
-        
+
         return image, text
     
     def _generate_random_text(

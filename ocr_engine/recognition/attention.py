@@ -21,7 +21,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple
 
-from .model import VGGEncoder, ResNetEncoder, BidirectionalLSTM
+from .model import VGGEncoder, BidirectionalLSTM
 
 
 # ---------------------------------------------------------------------------
@@ -272,8 +272,6 @@ class AttentionCRNN(nn.Module):
         # 1. CNN Encoder
         if encoder_type == "vgg":
             self.encoder = VGGEncoder(input_channels)
-        elif encoder_type == "resnet":
-            self.encoder = ResNetEncoder(input_channels)
         else:
             raise ValueError(f"Bilinmeyen encoder tipi: {encoder_type}")
 
