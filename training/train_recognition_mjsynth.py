@@ -8,6 +8,7 @@ Gelismis MJSynth Egitim Script'i
 """
 
 import sys
+import os
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -106,9 +107,11 @@ class AdvancedTrainer:
         # Metrikler
         self.best_val_acc = 0
         self.epoch = 0
+        self.start_epoch = 0       # resume edilince load_checkpoint tarafindan guncellenir
         self.global_step = 0
-        self.scheduler = None  # train() icinde olusturulacak
+        self.scheduler = None      # train() icinde olusturulacak
         self.plateau_scheduler = None  # val mevcut oldugunda ReduceLROnPlateau
+        self._pending_plateau_state = None  # resume sonrasi scheduler yaratilinca uygulanir
         
         # Model parametreleri
         total_params = sum(p.numel() for p in self.model.parameters())
@@ -288,12 +291,19 @@ class AdvancedTrainer:
                 patience=3, min_lr=1e-7, verbose=True
             )
             print("[LR] ReduceLROnPlateau aktif (val_loss izleniyor, patience=3)")
+            # Resume: plateau_scheduler state'i geri yukle
+            if self._pending_plateau_state is not None:
+                self.plateau_scheduler.load_state_dict(self._pending_plateau_state)
+                self._pending_plateau_state = None
+                print("[LR] ReduceLROnPlateau state checkpoint'ten geri yuklendi")
         else:
             # Validation yoksa: OneCycleLR
+            # Resume durumunda kalan step sayisini hesapla
+            remaining_epochs = epochs - self.start_epoch
             self.scheduler = OneCycleLR(
                 self.optimizer,
                 max_lr=self.lr,
-                epochs=epochs,
+                epochs=remaining_epochs if remaining_epochs > 0 else epochs,
                 steps_per_epoch=len(train_loader),
                 pct_start=0.1,
                 anneal_strategy='cos'
@@ -314,8 +324,8 @@ class AdvancedTrainer:
         print("="*70 + "\n")
         
         training_start = time.time()
-        
-        for epoch in range(1, epochs + 1):
+
+        for epoch in range(self.start_epoch + 1, epochs + 1):
             self.epoch = epoch
             
             # Train
@@ -404,11 +414,16 @@ class AdvancedTrainer:
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.epoch = checkpoint['epoch']
+        self.start_epoch = checkpoint['epoch']   # egitim dongusu buradan devam eder
         self.best_val_acc = checkpoint.get('best_val_acc', 0)
         self.global_step = checkpoint.get('global_step', 0)
+        # OneCycleLR state (varsa)
         if checkpoint.get('scheduler_state_dict') and self.scheduler is not None:
             self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        # ReduceLROnPlateau state: train() scheduler'i yaratinca uygulanacak
+        self._pending_plateau_state = checkpoint.get('plateau_scheduler_state_dict')
         print(f"[CHECKPOINT] Yuklendi: epoch {self.epoch}, best_acc {self.best_val_acc*100:.2f}%")
+        print(f"[CHECKPOINT] Egitim epoch {self.start_epoch + 1}'den devam edecek")
 
 
 def main():
@@ -431,6 +446,22 @@ def main():
     
     args = parser.parse_args()
     
+    # -------------------------------------------------------------- #
+    # CPU Affinity: P-cekirdekler (0-7) + 6 E-cekirdek (8-13)       #
+    # Logical 14 ve 15 (2 E-cekirdek) kullaniciya birakildi          #
+    # -------------------------------------------------------------- #
+    try:
+        import psutil
+        _use_cpus = list(range(14))  # logical 0-13
+        psutil.Process(os.getpid()).cpu_affinity(_use_cpus)
+        print("[CPU] Affinity: 0-13 aktif (P-core 0-7 + E-core 8-13) | 14,15 serbest")
+    except Exception as e:
+        print(f"[CPU] Affinity ayarlanamadi: {e}")
+
+    # Ana process torch thread sayisi (val/metrik icin)
+    torch.set_num_threads(4)
+    torch.set_num_interop_threads(2)
+
     # CUDA optimizasyonlari
     if torch.cuda.is_available():
         torch.backends.cudnn.benchmark = True  # En hizli algoritmayi sec
@@ -491,8 +522,11 @@ def main():
     print(f"[SPLIT] Train: {train_size:,} | Val: {val_size:,}")
     
     # DataLoaders - Optimize edilmis
-    num_workers = 2 if torch.cuda.is_available() else 0  # GPU varsa 2 worker
-    
+    # 6 worker x ~2 thread = 12 thread (14 mevcut threadden)
+    # Ana process 2 thread kullanir, 14-15 kullaniciya kalir
+    num_workers = 6 if torch.cuda.is_available() else 0
+    pf = 4 if num_workers > 0 else None  # 4 batch onceden hazirla
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -501,21 +535,22 @@ def main():
         collate_fn=collate_recognition,
         pin_memory=True,
         persistent_workers=True if num_workers > 0 else False,
-        prefetch_factor=2 if num_workers > 0 else None
+        prefetch_factor=pf,
+        drop_last=True  # son kucuk batch'i at (BatchNorm + AMP icin stabil)
     )
-    
+
     val_loader = DataLoader(
         val_dataset,
-        batch_size=args.batch_size,
+        batch_size=args.batch_size * 2,  # val'da gradient yok, 2x batch guvende
         shuffle=False,
         num_workers=num_workers,
         collate_fn=collate_recognition,
         pin_memory=True,
         persistent_workers=True if num_workers > 0 else False,
-        prefetch_factor=2 if num_workers > 0 else None
+        prefetch_factor=pf
     )
-    
-    print(f"[DATALOADER] num_workers: {num_workers}, prefetch_factor: {2 if num_workers > 0 else 'None'}")
+
+    print(f"[DATALOADER] num_workers: {num_workers}, prefetch_factor: {pf}, drop_last: True")
     
     # Trainer with AMP
     trainer = AdvancedTrainer(config, vocab, device=args.device, use_amp=True)
