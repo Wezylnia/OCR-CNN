@@ -288,7 +288,7 @@ class AdvancedTrainer:
             self.scheduler = None
             self.plateau_scheduler = ReduceLROnPlateau(
                 self.optimizer, mode='min', factor=0.5,
-                patience=3, min_lr=1e-7, verbose=True
+                patience=3, min_lr=1e-7
             )
             print("[LR] ReduceLROnPlateau aktif (val_loss izleniyor, patience=3)")
             # Resume: plateau_scheduler state'i geri yukle

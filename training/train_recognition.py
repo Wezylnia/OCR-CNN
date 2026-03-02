@@ -237,7 +237,6 @@ class RecognitionTrainer:
                 factor=0.5,
                 patience=5,
                 min_lr=1e-7,
-                verbose=True,
             )
             print("[LR] ReduceLROnPlateau aktif (val_loss izleniyor, patience=5)")
         else:
