@@ -135,9 +135,16 @@ class AdvancedTrainer:
         sample_preds = []  # Ornek tahminler icin
         
         start_time = time.time()
+        quiet = getattr(self, 'quiet', False)
+        log_interval = 100   # quiet modda kac batch'te bir yazdir
+        ETA_WARMUP = 20      # ilk N batch CUDA+DataLoader warmup — ETA hesabina katma
+        eta_start_time = None
+        eta_start_batch = 0
+        running_loss_sum = 0.0   # son log_interval batch'in kayip toplami
+        running_loss_cnt = 0
         
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{total_epochs}", 
-                    ncols=120, leave=True)
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{total_epochs}",
+                    ncols=120, leave=True, disable=quiet)
         
         for batch_idx, batch in enumerate(pbar):
             images = batch['images'].to(self.device)
@@ -190,8 +197,11 @@ class AdvancedTrainer:
                 self.scheduler.step()
             
             self.global_step += 1
-            total_loss += loss.item()
-            
+            _l = loss.item()
+            total_loss += _l
+            running_loss_sum += _l
+            running_loss_cnt += 1
+
             # Decode & metrikler (her 50 batch'te bir)
             if batch_idx % 50 == 0:
                 with torch.no_grad():
@@ -208,12 +218,46 @@ class AdvancedTrainer:
             current_lr = self.optimizer.param_groups[0]['lr']
             metrics = calculate_metrics(all_preds, all_targets) if all_preds else {'word_acc': 0, 'char_acc': 0}
             
-            pbar.set_postfix({
-                'loss': f"{loss.item():.4f}",
-                'word': f"{metrics['word_acc']*100:.1f}%",
-                'char': f"{metrics['char_acc']*100:.1f}%",
-                'lr': f"{current_lr:.2e}"
-            })
+            # ETA warmup: CUDA+DataLoader ilk batchleri cok yavas, ETA'yi bozar
+            if eta_start_time is None and batch_idx >= ETA_WARMUP:
+                eta_start_time = time.time()
+                eta_start_batch = batch_idx
+
+            if quiet:
+                if batch_idx % log_interval == 0:
+                    pct = batch_idx / len(train_loader) * 100
+                    now = time.time()
+                    if eta_start_time is not None:
+                        eta_elapsed = now - eta_start_time
+                        eta_batches_done = batch_idx - eta_start_batch + 1
+                        batches_left = len(train_loader) - batch_idx - 1
+                        eta_sec = (eta_elapsed / eta_batches_done * batches_left) if eta_batches_done > 0 else 0
+                        spd = eta_batches_done * len(images) / eta_elapsed  # samples/sec
+                    else:
+                        eta_sec = 0
+                        spd = 0
+                    eta_str = str(timedelta(seconds=int(eta_sec))) if eta_sec > 0 else "(isiniyor...)"
+                    avg_loss = running_loss_sum / running_loss_cnt if running_loss_cnt else 0
+                    running_loss_sum = 0.0   # pencereyi sifirla
+                    running_loss_cnt = 0
+                    epoch_avg = total_loss / (batch_idx + 1)
+                    spd_str  = f"{spd:.0f} img/s" if spd > 0 else "..."
+                    print(f"  Epoch {epoch} [{pct:5.1f}%] "
+                          f"loss={avg_loss:.4f} (avg={epoch_avg:.4f}) "
+                          f"word={metrics['word_acc']*100:.1f}% "
+                          f"char={metrics['char_acc']*100:.1f}% "
+                          f"lr={current_lr:.2e} "
+                          f"spd={spd_str} "
+                          f"step={self.global_step} "
+                          f"ETA={eta_str}",
+                          flush=True)
+            else:
+                pbar.set_postfix({
+                    'loss': f"{loss.item():.4f}",
+                    'word': f"{metrics['word_acc']*100:.1f}%",
+                    'char': f"{metrics['char_acc']*100:.1f}%",
+                    'lr': f"{current_lr:.2e}"
+                })
         
         elapsed = time.time() - start_time
         avg_loss = total_loss / len(train_loader)
@@ -237,7 +281,7 @@ class AdvancedTrainer:
         all_targets = []
         sample_preds = []
         
-        for batch_idx, batch in enumerate(tqdm(val_loader, desc="Validation", ncols=100)):
+        for batch_idx, batch in enumerate(tqdm(val_loader, desc="Validation", ncols=100, disable=getattr(self, 'quiet', False))):
             images = batch['images'].to(self.device)
             labels = batch['labels'].to(self.device)
             label_lengths = batch['label_lengths']
@@ -320,7 +364,7 @@ class AdvancedTrainer:
         print(f"  Batch boyutu: {train_loader.batch_size}")
         print(f"  Epoch sayisi: {epochs}")
         print(f"  Batch/epoch: {len(train_loader)}")
-        print(f"  Baslangic LR: {self.lr}")
+        print(f"  Baslangic LR: {self.optimizer.param_groups[0]['lr']:.2e}")
         print("="*70 + "\n")
         
         training_start = time.time()
@@ -347,8 +391,8 @@ class AdvancedTrainer:
                     match = "[OK]" if target == pred else "[X]"
                     print(f"    {match} '{target}' -> '{pred}'")
             
-            # Validation
-            if val_loader and epoch % 2 == 0:  # Her 2 epoch'ta bir
+            # Validation — her epoch (shard egitimde ~45sn, onemli sinyal)
+            if val_loader:
                 val_metrics = self.validate(val_loader)
                 print(f"\n  [VAL]   Loss: {val_metrics['loss']:.4f} | "
                       f"Word Acc: {val_metrics['word_acc']*100:.2f}% | "
@@ -443,6 +487,12 @@ def main():
     parser.add_argument('--save_dir', type=str, default='checkpoints/advanced')
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--quiet', action='store_true', default=False,
+                        help='tqdm kapali, sadece epoch ozetleri yazilir (Kaggle/CI icin)')
+    parser.add_argument('--num_workers', type=int, default=None,
+                        help='DataLoader worker sayisi (varsayilan: GPU=4, CPU=0)')
+    parser.add_argument('--lr', type=float, default=None,
+                        help='Optimizer LR override — checkpoint LR ini eze yazar (ornek: 1e-4)')
     
     args = parser.parse_args()
     
@@ -522,10 +572,11 @@ def main():
     print(f"[SPLIT] Train: {train_size:,} | Val: {val_size:,}")
     
     # DataLoaders - Optimize edilmis
-    # 6 worker x ~2 thread = 12 thread (14 mevcut threadden)
-    # Ana process 2 thread kullanir, 14-15 kullaniciya kalir
-    num_workers = 6 if torch.cuda.is_available() else 0
-    pf = 4 if num_workers > 0 else None  # 4 batch onceden hazirla
+    if args.num_workers is not None:
+        num_workers = args.num_workers
+    else:
+        num_workers = 4 if torch.cuda.is_available() else 0
+    pf = 4 if num_workers > 0 else None
 
     train_loader = DataLoader(
         train_dataset,
@@ -554,12 +605,22 @@ def main():
     
     # Trainer with AMP
     trainer = AdvancedTrainer(config, vocab, device=args.device, use_amp=True)
+    trainer.quiet = args.quiet
     
     # Resume
     if args.resume:
         trainer.load_checkpoint(args.resume)
-    
-    # Egit
+
+    # LR override: --lr ile checkpoint LR'si ezilir (ince ayar icin 1e-4 gibi)
+    if args.lr is not None:
+        old_lr = trainer.optimizer.param_groups[0]['lr']
+        for pg in trainer.optimizer.param_groups:
+            pg['lr'] = args.lr
+        trainer.lr = args.lr
+        # Plateau scheduler state'ini sifirla: eski LR ile olculen 'best' artik gecersiz
+        trainer._pending_plateau_state = None
+        print(f"[LR OVERRIDE] {old_lr:.2e} -> {args.lr:.2e}  (plateau state sifirlandi)")
+
     trainer.train(
         train_loader=train_loader,
         val_loader=val_loader,

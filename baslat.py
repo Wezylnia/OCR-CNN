@@ -217,12 +217,14 @@ cmd = [
     "--data_root",  DATA_ROOT,
     "--train_json", TRAIN_JSON,
     "--config",     str(WORK / "config.yaml"),
-    "--epochs",     "10",
+    "--epochs",     "25",
     "--batch_size", str(BATCH),
     "--augment",
     "--val_split",  "0.02",
     "--save_dir",   SAVE_DIR,
     "--device",     DEVICE,
+    "--num_workers", "2",   # Kaggle: sadece 2 CPU core var
+    "--quiet",      # Kaggle: tqdm kapali, log tasması önlenir
 ] + resume_args
 
 print(f"\n  Komut: {' '.join(cmd[:6])} ...\n" + "="*60 + "\n", flush=True)

@@ -15,11 +15,11 @@ class RecognitionAugmentor:
         self,
         stretch_range: Tuple[float, float] = (0.8, 1.2),
         shear_range: Tuple[float, float] = (-0.1, 0.1),
-        noise_prob: float = 0.3,
-        blur_prob: float = 0.3,
-        invert_prob: float = 0.1,
-        elastic_prob: float = 0.3,
-        grid_distort_prob: float = 0.2,
+        noise_prob: float = 0.15,
+        blur_prob: float = 0.15,
+        invert_prob: float = 0.05,
+        elastic_prob: float = 0.15,
+        grid_distort_prob: float = 0.1,
         handwriting_mode: bool = False
     ):
         self.stretch_range = stretch_range
@@ -46,12 +46,12 @@ class RecognitionAugmentor:
                     image = self.grid_distortion(image)
 
             # Parlaklik ayari (numpy ile)
-            if random.random() < 0.3:
+            if random.random() < 0.15:
                 factor = random.uniform(0.7, 1.3)
                 image = np.clip(image.astype(np.float32) * factor, 0, 255).astype(np.uint8)
 
             # Kontrast ayari (numpy ile)
-            if random.random() < 0.3:
+            if random.random() < 0.15:
                 factor = random.uniform(0.8, 1.2)
                 mean = np.mean(image)
                 image = np.clip((image.astype(np.float32) - mean) * factor + mean, 0, 255).astype(np.uint8)
@@ -67,7 +67,7 @@ class RecognitionAugmentor:
                 image = 255 - image
 
             # Salt & pepper noise
-            if random.random() < 0.1:
+            if random.random() < 0.05:
                 noise_mask = np.random.random(image.shape)
                 image = np.where(noise_mask < 0.02, 0, image)   # Salt
                 image = np.where(noise_mask > 0.98, 255, image)  # Pepper
@@ -79,15 +79,15 @@ class RecognitionAugmentor:
                     image = self.elastic_transform(image, alpha=12, sigma=3)
 
             # Yatay germe
-            if random.random() < 0.2:
+            if random.random() < 0.1:
                 image = self.horizontal_stretch(image)
 
             # Shear donusumu
-            if random.random() < 0.15:
+            if random.random() < 0.08:
                 image = self.shear(image)
 
             # CutOut: rastgele dikdortgen maskeleme
-            if random.random() < 0.25:
+            if random.random() < 0.12:
                 h, w = image.shape[:2]
                 rh = random.randint(h // 4, h // 2)
                 rw = random.randint(w // 8, max(w // 4, 1))
@@ -97,7 +97,7 @@ class RecognitionAugmentor:
                 image[y0:y0 + rh, x0:x0 + rw] = fill_val
 
             # JPEG sikistirma artifaktlari
-            if random.random() < 0.2:
+            if random.random() < 0.1:
                 quality = random.randint(30, 80)
                 _, buf = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, quality])
                 read_flag = cv2.IMREAD_GRAYSCALE if image.ndim == 2 else cv2.IMREAD_COLOR
