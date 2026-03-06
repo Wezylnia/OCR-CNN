@@ -33,16 +33,10 @@ class Denoiser:
         Returns:
             Gurultusu giderilmis gorsel
         """
-        if self.method == "bilateral":
-            return self._bilateral_filter(image)
-        elif self.method == "gaussian":
-            return self._gaussian_filter(image)
-        elif self.method == "nlmeans":
-            return self._nlmeans_filter(image)
-        elif self.method == "median":
-            return self._median_filter(image)
-        else:
+        fn = getattr(self, f'_{self.method}_filter', None)
+        if fn is None:
             raise ValueError(f"Bilinmeyen denoise yontemi: {self.method}")
+        return fn(image)
     
     def _bilateral_filter(self, image: np.ndarray) -> np.ndarray:
         """

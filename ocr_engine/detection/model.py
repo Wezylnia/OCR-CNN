@@ -251,15 +251,16 @@ class DBNet(nn.Module):
     
     def _init_weights(self):
         """Agirliklari initialize et (backbone haric)"""
-        for m in [self.fpn, self.head]:
-            for module in m.modules():
-                if isinstance(module, nn.Conv2d):
-                    nn.init.kaiming_normal_(module.weight, mode='fan_out')
-                    if module.bias is not None:
-                        nn.init.zeros_(module.bias)
-                elif isinstance(module, nn.BatchNorm2d):
-                    nn.init.ones_(module.weight)
-                    nn.init.zeros_(module.bias)
+        def _init(m):
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+        self.fpn.apply(_init)
+        self.head.apply(_init)
     
     def forward(
         self,

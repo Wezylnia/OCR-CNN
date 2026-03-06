@@ -42,16 +42,10 @@ class Binarizer:
         else:
             gray = image.copy()
         
-        if self.method == "adaptive":
-            return self._adaptive_threshold(gray)
-        elif self.method == "otsu":
-            return self._otsu_threshold(gray)
-        elif self.method == "sauvola":
-            return self._sauvola_threshold(gray)
-        elif self.method == "niblack":
-            return self._niblack_threshold(gray)
-        else:
+        fn = getattr(self, f'_{self.method}_threshold', None)
+        if fn is None:
             raise ValueError(f"Bilinmeyen binarization yontemi: {self.method}")
+        return fn(gray)
     
     def _adaptive_threshold(self, gray: np.ndarray) -> np.ndarray:
         """OpenCV adaptive threshold"""

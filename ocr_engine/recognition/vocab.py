@@ -125,24 +125,9 @@ class Vocabulary:
         return self._size
     
     def encode(self, text: str) -> List[int]:
-        """
-        Metni index listesine donustur
-        
-        Args:
-            text: Giris metni
-            
-        Returns:
-            Index listesi
-        """
-        indices = []
-        for char in text:
-            if char in self.char_to_idx:
-                indices.append(self.char_to_idx[char])
-            elif self.include_unk:
-                indices.append(self.unk_idx)
-            # else: karakteri atla
-        
-        return indices
+        """Metni index listesine donustur"""
+        default = self.unk_idx if self.include_unk else None
+        return [i for c in text if (i := self.char_to_idx.get(c, default)) is not None]
     
     def decode(
         self,
@@ -151,35 +136,19 @@ class Vocabulary:
         remove_unk: bool = False,
         remove_sos_eos: bool = True
     ) -> str:
-        """
-        Index listesini metne donustur.
-
-        Args:
-            indices: Index listesi
-            remove_blank: Blank token'lari kaldir
-            remove_unk: UNK token'lari kaldir
-            remove_sos_eos: SOS/EOS tokenlarini kaldir
-
-        Returns:
-            Metin
-        """
-        chars = []
-        for idx in indices:
-            if idx not in self.idx_to_char:
-                continue
-
-            char = self.idx_to_char[idx]
-
-            if remove_blank and char == self.BLANK_TOKEN:
-                continue
-            if remove_unk and char == self.UNK_TOKEN:
-                continue
-            if remove_sos_eos and char in (self.SOS_TOKEN, self.EOS_TOKEN):
-                continue
-
-            chars.append(char)
-
-        return ''.join(chars)
+        """Index listesini metne donustur."""
+        skip: set = set()
+        if remove_blank and self.blank_idx >= 0:
+            skip.add(self.blank_idx)
+        if remove_unk and self.unk_idx >= 0:
+            skip.add(self.unk_idx)
+        if remove_sos_eos:
+            if self.sos_idx >= 0: skip.add(self.sos_idx)
+            if self.eos_idx >= 0: skip.add(self.eos_idx)
+        return ''.join(
+            self.idx_to_char[i] for i in indices
+            if i in self.idx_to_char and i not in skip
+        )
     
     def __len__(self) -> int:
         return self._size

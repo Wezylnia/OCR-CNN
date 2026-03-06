@@ -146,33 +146,11 @@ class ImageEnhancer:
     # ------------------------------------------------------------------
 
     def _remove_shadows(self, bgr: np.ndarray) -> np.ndarray:
-        """
-        Duz (gradyan) aydinlatma golgelerini gider.
-        Her kanalda buyuk pencereli blur ile normalize eder.
-        """
-        result = np.zeros_like(bgr)
-
-        for i in range(3):
-            ch = bgr[:, :, i].astype(np.float32)
-
-            # Kucuk ayrinti: kanal ile buyuk pencereli blur farki
-            kernel_size = max(
-                bgr.shape[0] // 8,
-                bgr.shape[1] // 8,
-                31
-            )
-            if kernel_size % 2 == 0:
-                kernel_size += 1
-
-            bg = cv2.GaussianBlur(ch, (kernel_size, kernel_size), 0)
-
-            # Normalize: (kanal / arka_plan) * 255
-            normalized = ch / (bg + 1e-6) * 128.0
-            normalized = np.clip(normalized, 0, 255).astype(np.uint8)
-
-            result[:, :, i] = normalized
-
-        return result
+        """Duz aydinlatma golgelerini buyuk-pencereli blur ile normalize ederek gider."""
+        k = max(bgr.shape[0] // 8, bgr.shape[1] // 8, 31) | 1
+        bgr_f = bgr.astype(np.float32)
+        bg = cv2.GaussianBlur(bgr_f, (k, k), 0)
+        return np.clip(bgr_f / (bg + 1e-6) * 128.0, 0, 255).astype(np.uint8)
 
     # ------------------------------------------------------------------
     # CLAHE

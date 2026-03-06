@@ -4,6 +4,7 @@ CTC Decoder - Model cikislarindan metin uretme
 
 import torch
 import numpy as np
+from itertools import groupby
 from typing import List, Tuple, Optional, Dict
 from .vocab import Vocabulary
 
@@ -101,59 +102,26 @@ class CTCDecoder:
         return decoded
 
     def _collapse_repeated(self, indices: List[int]) -> str:
-        """
-        Tekrarli karakterleri birlestir ve blank'lari kaldir
-        
-        Args:
-            indices: Index listesi
-            
-        Returns:
-            Decode edilmis metin
-        """
-        collapsed = []
-        prev_idx = None
-        
-        for idx in indices:
-            # Blank atla
-            if idx == self.blank_idx:
-                prev_idx = None
-                continue
-            
-            # Tekrar atla
-            if idx == prev_idx:
-                continue
-            
-            collapsed.append(idx)
-            prev_idx = idx
-        
+        """Tekrarli karakterleri birlestir ve blank'lari kaldir"""
+        collapsed = [k for k, _ in groupby(indices) if k != self.blank_idx]
         return self.vocab.decode(collapsed, remove_blank=True)
     
     def decode_batch(
         self,
         log_probs: torch.Tensor,
-        method: str = "greedy",
-        beam_width: int = 5,
         lengths: Optional[torch.Tensor] = None
     ) -> List[str]:
         """
-        Batch decoding
+        Batch decoding (greedy). Beam search icin CTCPrefixDecoder kullanin.
 
         Args:
             log_probs: [seq_len, batch, num_classes]
-            method: Decoding yontemi ('greedy' desteklenir)
-            beam_width: Kullanilmiyor, geri uyumluluk icin tutuldu
             lengths: [batch] - her ornek icin sequence uzunlugu
 
         Returns:
             Decode edilmis metin listesi
         """
-        if method == "greedy":
-            return self.decode_greedy(log_probs, lengths)
-        else:
-            raise ValueError(
-                f"Bilinmeyen decoding yontemi: '{method}'. "
-                "Beam search icin CTCPrefixDecoder kullanin."
-            )
+        return self.decode_greedy(log_probs, lengths)
 
 
 class CTCPrefixDecoder:

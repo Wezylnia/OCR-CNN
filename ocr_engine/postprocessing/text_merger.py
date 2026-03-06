@@ -220,12 +220,8 @@ class TextMerger:
         
         # Birlesik kutu
         all_points = np.vstack([b.box for b in boxes])
-        merged_box = np.array([
-            [np.min(all_points[:, 0]), np.min(all_points[:, 1])],
-            [np.max(all_points[:, 0]), np.min(all_points[:, 1])],
-            [np.max(all_points[:, 0]), np.max(all_points[:, 1])],
-            [np.min(all_points[:, 0]), np.max(all_points[:, 1])]
-        ])
+        (x1, y1), (x2, y2) = all_points.min(axis=0), all_points.max(axis=0)
+        merged_box = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]])
         
         # Ortalama guven
         avg_confidence = sum(b.confidence for b in boxes) / len(boxes)

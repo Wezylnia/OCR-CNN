@@ -241,7 +241,7 @@ class CRNN(nn.Module):
     
     def _init_weights(self):
         """Agirliklari initialize et"""
-        for m in self.modules():
+        def _init(m):
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out')
                 if m.bias is not None:
@@ -253,6 +253,7 @@ class CRNN(nn.Module):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
+        self.apply(_init)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """

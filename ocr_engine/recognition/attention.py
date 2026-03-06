@@ -297,7 +297,7 @@ class AttentionCRNN(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
-        for m in self.modules():
+        def _init(m):
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight)
                 if m.bias is not None:
@@ -309,6 +309,7 @@ class AttentionCRNN(nn.Module):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
+        self.apply(_init)
 
     def _encode(self, x: torch.Tensor) -> torch.Tensor:
         """CNN + BiLSTM ile goruntu encode et."""
