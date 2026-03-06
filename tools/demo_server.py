@@ -5,7 +5,7 @@ Sadece kelimeleri okur (detection yok, tek kelime/satir icin)
 
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from flask import Flask, request, jsonify, render_template_string
 import torch
@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 from PIL import Image
 import io
+import argparse
 
 from ocr_engine.recognition.vocab import Vocabulary
 from ocr_engine.recognition.model import CRNN
@@ -26,14 +27,15 @@ vocab = None
 decoder = None
 device = None
 
-def load_model():
+def load_model(checkpoint: str = "checkpoints/realworld_finetune/best_model.pth",
+               device_str: str = "cuda"):
     """Modeli yukle"""
     global model, vocab, decoder, device
-    
+
     print("Model yukleniyor...")
-    
+
     # Device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device(device_str if device_str != "cuda" or torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
     
     # Vocabulary
@@ -51,7 +53,7 @@ def load_model():
     ).to(device)
     
     # Checkpoint yukle
-    checkpoint_path = Path("checkpoints/1M_turbo/checkpoint_epoch_3.pth")
+    checkpoint_path = Path(checkpoint)
     if checkpoint_path.exists():
         print(f"Checkpoint yukleniyor: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
@@ -453,10 +455,15 @@ def recognize():
         })
 
 if __name__ == '__main__':
-    load_model()
+    _parser = argparse.ArgumentParser(description="OCR Demo Server")
+    _parser.add_argument("--checkpoint", default="checkpoints/realworld_finetune/best_model.pth",
+                         help="Kullanılacak checkpoint yolu")
+    _parser.add_argument("--port", type=int, default=5000)
+    _parser.add_argument("--device", default="cuda")
+    _args = _parser.parse_args()
+
+    load_model(_args.checkpoint, _args.device)
     print("\n" + "="*60)
-    print("TEST SERVER BASLATILIYOR")
-    print("="*60)
-    print("Tarayicinizda ac: http://localhost:5000")
+    print(f"TEST SERVER BASLATILIYOR — http://localhost:{_args.port}")
     print("="*60 + "\n")
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    app.run(host='0.0.0.0', port=_args.port, debug=False)

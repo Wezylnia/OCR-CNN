@@ -41,10 +41,15 @@ def extract_tar_gz(tar_path: str, output_dir: str):
             
             print(f"📊 Toplam {total:,} dosya bulundu")
             print()
-            
-            # Progress bar ile cikar
-            for member in tqdm(members, desc="Extracting", unit="file"):
-                tar.extract(member, path=output_dir)
+
+            # Güvenlik: path traversal saldırısına karşı her yolu doğrula
+            abs_output = output_dir.resolve()
+            for member in members:
+                target = (abs_output / member.name).resolve()
+                if not str(target).startswith(str(abs_output)):
+                    raise ValueError(f"Güvensiz arşiv yolu algılandı: {member.name!r}")
+
+            tar.extractall(path=output_dir, members=tqdm(members, desc="Extracting", unit="file"))
         
         print()
         print("✅ Basariyla cikarildi!")

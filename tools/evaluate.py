@@ -72,7 +72,7 @@ def evaluate_recognition(
     from ocr_engine.recognition.vocab import Vocabulary
     from ocr_engine.recognition.model import CRNN
     from ocr_engine.recognition.decoder import CTCPrefixDecoder
-    from training.recognition_dataset import RecognitionDataset, collate_recognition
+    from training.dataset import RecognitionDataset, collate_recognition
     from torch.utils.data import DataLoader
 
     print(f"\n=== Recognition Degerlendirme ===")
@@ -126,7 +126,7 @@ def evaluate_recognition(
     with torch.no_grad():
         for batch in tqdm(loader, desc="Degerlendiriliyor"):
             images  = batch['images'].to(dev)
-            texts   = batch['text']
+            texts   = batch['texts']
 
             log_probs = model(images)  # [T, B, C]
             results   = decoder.decode_batch(log_probs)
